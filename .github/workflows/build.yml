@@ -1,0 +1,194 @@
+name: Build Vanadium WebView module
+
+on:
+  schedule:
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+    inputs:
+      gs_commit:
+        description: "GrapheneOS commit (empty = latest commit touching the APK)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  EXPECTED_CERT_SHA256: "C6:AD:B8:B8:3C:6D:4C:17:D2:92:AF:DE:56:FD:48:8A:51:D3:16:FF:8F:2C:11:C5:41:02:23:BF:F8:A7:DB:B3"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve source commit
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          COMMIT="${{ inputs.gs_commit }}"
+          if [ -z "$COMMIT" ]; then
+            API="https://gitlab.com/api/v4/projects/grapheneos%2Fplatform_external_vanadium/repository/commits"
+            WV=$(curl -sf --retry 3 "${API}?path=prebuilt%2Farm64-multilib%2FVanadiumWebView.apk&per_page=1" \
+              | jq -er '.[0] | [.committed_date, .id] | @tsv') || { echo "::error::GitLab query failed"; exit 1; }
+            CFG=$(curl -sf --retry 3 "${API}?path=prebuilt%2FVanadiumConfig.apk&per_page=1" \
+              | jq -er '.[0] | [.committed_date, .id] | @tsv') || { echo "::error::GitLab query failed"; exit 1; }
+            WV_DATE="${WV%%$'\t'*}"; WV_ID="${WV#*$'\t'}"
+            CFG_DATE="${CFG%%$'\t'*}"; CFG_ID="${CFG#*$'\t'}"
+            if [[ "$CFG_DATE" > "$WV_DATE" ]]; then COMMIT="$CFG_ID"; else COMMIT="$WV_ID"; fi
+          fi
+          SHORT="${COMMIT:0:12}"
+          echo "commit=$COMMIT"   >> "$GITHUB_OUTPUT"
+          echo "short=$SHORT"     >> "$GITHUB_OUTPUT"
+          echo "Source commit: $COMMIT"
+
+          if gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --jq '.[].tag_name' \
+              | grep -Eq -- "-${SHORT}$"; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download APKs
+        if: steps.source.outputs.skip == 'false'
+        run: |
+          C="${{ steps.source.outputs.commit }}"
+          BASE="https://gitlab.com/grapheneos/platform_external_vanadium/-/raw/$C/prebuilt"
+          mkdir -p module/system/app/webview module/system/app/VanadiumConfig
+          curl -fL --retry 3 -o module/system/app/webview/webview.apk "$BASE/arm64-multilib/VanadiumWebView.apk"
+          curl -fL --retry 3 -o module/system/app/VanadiumConfig/VanadiumConfig.apk "$BASE/VanadiumConfig.apk"
+
+      - name: Verify signature and compute hashes
+        if: steps.source.outputs.skip == 'false'
+        id: hashes
+        run: |
+          AAPT2=$(find "$ANDROID_HOME/build-tools" -name aapt2 | sort -V | tail -n1)
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -n1)
+
+          CERT=$("$APKSIGNER" verify --print-certs module/system/app/webview/webview.apk \
+            | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n1)
+          echo "cert: $CERT"
+          [ "$CERT" = "$EXPECTED_CERT_SHA256" ] || { echo "::error::not signed by GrapheneOS"; exit 1; }
+
+          WV=$(sha256sum module/system/app/webview/webview.apk | cut -d' ' -f1)
+          CFG=$(sha256sum module/system/app/VanadiumConfig/VanadiumConfig.apk | cut -d' ' -f1)
+          echo "webview: $WV"
+          echo "config : $CFG"
+          echo "wv=$WV"   >> "$GITHUB_OUTPUT"
+          echo "cfg=$CFG" >> "$GITHUB_OUTPUT"
+
+          "$AAPT2" dump badging module/system/app/webview/webview.apk | sed -n '1,2p'
+
+      - name: Update module metadata
+        if: steps.source.outputs.skip == 'false'
+        id: version
+        run: |
+          AAPT2=$(find "$ANDROID_HOME/build-tools" -name aapt2 | sort -V | tail -n1)
+          BADGING=$("$AAPT2" dump badging module/system/app/webview/webview.apk)
+          VERSION_NAME=$(echo "$BADGING" | sed -n "s/^package:.* versionName='\([^']*\)'.*/\1/p" | head -n1)
+          MIN_SDK=$(echo "$BADGING" | sed -n "s/^sdkVersion:'\([0-9]*\)'.*/\1/p" | head -n1)
+          [ -n "$VERSION_NAME" ] || { echo "::error::no versionName"; exit 1; }
+          [ -z "$MIN_SDK" ] && MIN_SDK=30
+
+          TAG="v${VERSION_NAME}-${{ steps.source.outputs.short }}"
+          CODE=$(date +%s)
+          WV="${{ steps.hashes.outputs.wv }}"
+          CFG="${{ steps.hashes.outputs.cfg }}"
+
+          sed -i "s|^version=.*|version=${VERSION_NAME}|" module/module.prop
+          sed -i "s|^versionCode=.*|versionCode=${CODE}|" module/module.prop
+          sed -i "s|^minApi=.*|minApi=${MIN_SDK}|" module/module.prop
+          sed -i "s|^webviewSha256=.*|webviewSha256=${WV}|" module/module.prop
+          grep -q '^configSha256=' module/module.prop || echo "configSha256=${CFG}" >> module/module.prop
+          sed -i "s|^configSha256=.*|configSha256=${CFG}|" module/module.prop
+
+          echo "tag=$TAG"      >> "$GITHUB_OUTPUT"
+          echo "code=$CODE"    >> "$GITHUB_OUTPUT"
+          echo "name=$VERSION_NAME" >> "$GITHUB_OUTPUT"
+          cat module/module.prop
+
+      - name: Build provider overlay
+        if: steps.source.outputs.skip == 'false'
+        run: |
+          BT=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n1)
+          ANDROID_JAR=$(find "$ANDROID_HOME/platforms" -mindepth 2 -maxdepth 2 -name android.jar | sort -V | tail -n1)
+          OUT="module/system/product/overlay/VanadiumWebViewProviderOverlay.apk"
+          mkdir -p module/system/product/overlay "$RUNNER_TEMP/ovl"
+
+          "$BT/aapt2" compile --dir overlay/res -o "$RUNNER_TEMP/ovl/resources.zip"
+          "$BT/aapt2" link \
+            -o "$RUNNER_TEMP/ovl/unsigned.apk" \
+            --manifest overlay/AndroidManifest.xml \
+            -I "$ANDROID_JAR" \
+            --min-sdk-version 30 --target-sdk-version 30 \
+            --version-code 1 --version-name 1.0 \
+            --no-resource-deduping --no-resource-removal \
+            "$RUNNER_TEMP/ovl/resources.zip"
+          "$BT/apksigner" sign \
+            --ks overlay/overlay.jks \
+            --ks-pass pass:vanadium-overlay \
+            --key-pass pass:vanadium-overlay \
+            --out "$OUT" \
+            "$RUNNER_TEMP/ovl/unsigned.apk"
+          "$BT/apksigner" verify "$OUT"
+
+      - name: Package module zip
+        if: steps.source.outputs.skip == 'false'
+        id: build
+        run: |
+          ZIP_NAME="VanadiumSystemWebView-${{ steps.version.outputs.tag }}.zip"
+          cd module
+          chmod +x customize.sh post-fs-data.sh META-INF/com/google/android/update-binary
+          zip -r "../${ZIP_NAME}" . -x '*.gitkeep' -x '*.git*'
+          cd ..
+          sha256sum "${ZIP_NAME}" > "${ZIP_NAME}.sha256"
+          cat "${ZIP_NAME}.sha256"
+          echo "zip=$ZIP_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Update update.json
+        if: steps.source.outputs.skip == 'false'
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          REPO="${{ github.repository }}"
+          ZIP_NAME="${{ steps.build.outputs.zip }}"
+          jq -n \
+            --arg version "$TAG" \
+            --argjson versionCode "${{ steps.version.outputs.code }}" \
+            --arg zipUrl "https://github.com/${REPO}/releases/download/${TAG}/${ZIP_NAME}" \
+            --arg changelog "https://github.com/${REPO}/releases/tag/${TAG}" \
+            '{version: $version, versionCode: $versionCode, zipUrl: $zipUrl, changelog: $changelog}' \
+            > update.json
+
+      - name: Publish release
+        if: steps.source.outputs.skip == 'false'
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Vanadium WebView ${{ steps.version.outputs.name }}
+          body: |
+            Source: GrapheneOS `${{ steps.source.outputs.commit }}`
+
+            | file | sha256 |
+            |---|---|
+            | webview.apk | `${{ steps.hashes.outputs.wv }}` |
+            | VanadiumConfig.apk | `${{ steps.hashes.outputs.cfg }}` |
+
+            APK signature checked against `CN=GrapheneOS`.
+          files: |
+            ${{ steps.build.outputs.zip }}
+            ${{ steps.build.outputs.zip }}.sha256
+          generate_release_notes: false
+
+      - name: Commit update.json
+        if: steps.source.outputs.skip == 'false'
+        run: |
+          if git diff --quiet -- update.json; then
+            echo "no changes"
+            exit 0
+          fi
+          git config user.name "0x6E756C6C707472"
+          git config user.email "0x6E756C6C707472@users.noreply.github.com"
+          git add update.json
+          git commit -m "chore: update metadata for ${{ steps.version.outputs.tag }}"
+          git push
