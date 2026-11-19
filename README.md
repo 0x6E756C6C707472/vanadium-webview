@@ -1,7 +1,8 @@
 # Vanadium SystemWebView
 
 Magisk / KernelSU module that installs [Vanadium WebView](https://github.com/grapheneos/vanadium)
-as a selectable WebView provider next to the stock one.
+as a selectable WebView provider next to the stock one, and keeps the Vanadium browser up to date
+with the module.
 
 ## Requirements
 

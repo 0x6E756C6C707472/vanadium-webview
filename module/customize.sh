@@ -30,6 +30,11 @@ check_sha() {
 check_sha webview.apk "$WV_APK" "$(grep '^webviewSha256=' "$MODPATH/module.prop" | cut -d= -f2)"
 check_sha VanadiumConfig.apk "$CFG_APK" "$(grep '^configSha256=' "$MODPATH/module.prop" | cut -d= -f2)"
 
+BR_APK="$MODPATH/browser/VanadiumBrowser.apk"
+if [ -f "$BR_APK" ]; then
+    check_sha VanadiumBrowser.apk "$BR_APK" "$(grep '^browserSha256=' "$MODPATH/module.prop" | cut -d= -f2)"
+fi
+
 ui_print "- Setting permissions..."
 set_perm_recursive "$MODPATH" 0 0 0755 0644
 set_perm_recursive "$MODPATH/system/app/webview" 0 0 0755 0644

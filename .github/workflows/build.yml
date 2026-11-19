@@ -55,9 +55,10 @@ jobs:
         run: |
           C="${{ steps.source.outputs.commit }}"
           BASE="https://gitlab.com/grapheneos/platform_external_vanadium/-/raw/$C/prebuilt"
-          mkdir -p module/system/app/webview module/system/app/VanadiumConfig
+          mkdir -p module/system/app/webview module/system/app/VanadiumConfig module/browser
           curl -fL --retry 3 -o module/system/app/webview/webview.apk "$BASE/arm64-multilib/VanadiumWebView.apk"
           curl -fL --retry 3 -o module/system/app/VanadiumConfig/VanadiumConfig.apk "$BASE/VanadiumConfig.apk"
+          curl -fL --retry 3 -o module/browser/VanadiumBrowser.apk "$BASE/arm64/VanadiumBrowser.apk"
 
       - name: Verify signature and compute hashes
         if: steps.source.outputs.skip == 'false'
@@ -65,25 +66,30 @@ jobs:
         run: |
           APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -n1)
 
-          VERIFY=$("$APKSIGNER" verify --print-certs module/system/app/webview/webview.apk 2>&1)
-          echo "$VERIFY" | sed -n '1,12p'
-
-          CERT=$(echo "$VERIFY" | grep -i 'SHA-256 digest' | head -n1 | sed 's/.*digest: *//' | tr -d ':' | tr 'A-F' 'a-f' | tr -d '[:space:]')
           EXPECTED=$(echo "$EXPECTED_CERT_SHA256" | tr -d ':' | tr 'A-F' 'a-f' | tr -d '[:space:]')
-          echo "cert:     $CERT"
-          echo "expected: $EXPECTED"
 
-          [ -n "$CERT" ] || { echo "::error::could not read APK certificate"; exit 1; }
-          [ "$CERT" = "$EXPECTED" ] || { echo "::error::APK is not signed by GrapheneOS"; exit 1; }
+          for apk in module/system/app/webview/webview.apk module/browser/VanadiumBrowser.apk; do
+            VERIFY=$("$APKSIGNER" verify --print-certs "$apk" 2>&1)
+            CERT=$(echo "$VERIFY" | grep -i 'SHA-256 digest' | head -n1 | sed 's/.*digest: *//' | tr -d ':' | tr 'A-F' 'a-f' | tr -d '[:space:]')
+            echo "$apk"
+            echo "  cert:     $CERT"
+            echo "  expected: $EXPECTED"
+            [ -n "$CERT" ] || { echo "::error::could not read APK certificate for $apk"; exit 1; }
+            [ "$CERT" = "$EXPECTED" ] || { echo "::error::$apk is not signed by GrapheneOS"; exit 1; }
+          done
 
           WV=$(sha256sum module/system/app/webview/webview.apk | cut -d' ' -f1)
           CFG=$(sha256sum module/system/app/VanadiumConfig/VanadiumConfig.apk | cut -d' ' -f1)
+          BR=$(sha256sum module/browser/VanadiumBrowser.apk | cut -d' ' -f1)
           echo "webview: $WV"
           echo "config : $CFG"
+          echo "browser: $BR"
           echo "wv=$WV"   >> "$GITHUB_OUTPUT"
           echo "cfg=$CFG" >> "$GITHUB_OUTPUT"
+          echo "br=$BR"   >> "$GITHUB_OUTPUT"
 
           "$AAPT2" dump badging module/system/app/webview/webview.apk | sed -n '1,2p'
+          "$AAPT2" dump badging module/browser/VanadiumBrowser.apk | sed -n '1,2p'
 
       - name: Update module metadata
         if: steps.source.outputs.skip == 'false'
@@ -100,6 +106,9 @@ jobs:
           CODE=$(date +%s)
           WV="${{ steps.hashes.outputs.wv }}"
           CFG="${{ steps.hashes.outputs.cfg }}"
+          BR="${{ steps.hashes.outputs.br }}"
+          BROWSER_VERSION_NAME=$("$AAPT2" dump badging module/browser/VanadiumBrowser.apk \
+            | sed -n "s/^package:.* versionName='\([^']*\)'.*/\1/p" | head -n1)
 
           sed -i "s|^version=.*|version=${VERSION_NAME}|" module/module.prop
           sed -i "s|^versionCode=.*|versionCode=${CODE}|" module/module.prop
@@ -107,6 +116,10 @@ jobs:
           sed -i "s|^webviewSha256=.*|webviewSha256=${WV}|" module/module.prop
           grep -q '^configSha256=' module/module.prop || echo "configSha256=${CFG}" >> module/module.prop
           sed -i "s|^configSha256=.*|configSha256=${CFG}|" module/module.prop
+          grep -q '^browserVersion=' module/module.prop || echo "browserVersion=${BROWSER_VERSION_NAME}" >> module/module.prop
+          sed -i "s|^browserVersion=.*|browserVersion=${BROWSER_VERSION_NAME}|" module/module.prop
+          grep -q '^browserSha256=' module/module.prop || echo "browserSha256=${BR}" >> module/module.prop
+          sed -i "s|^browserSha256=.*|browserSha256=${BR}|" module/module.prop
 
           echo "tag=$TAG"      >> "$GITHUB_OUTPUT"
           echo "code=$CODE"    >> "$GITHUB_OUTPUT"
