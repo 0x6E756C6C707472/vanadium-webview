@@ -21,9 +21,7 @@ adb reboot
 Then select **Vanadium WebView** in *Developer options → WebView implementation*.
 The stock WebView is kept, so removing the module reverts everything.
 
-The module also installs and updates the Vanadium browser. To turn that off, press the module's
-**Action** button in the root manager (it toggles `browser_disabled`; takes effect on next boot).
-The WebView provider itself is always managed by the module.
+The module also installs and updates the Vanadium browser.
 
 ## Builds
 
