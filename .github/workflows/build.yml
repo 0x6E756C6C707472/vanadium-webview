@@ -63,13 +63,18 @@ jobs:
         if: steps.source.outputs.skip == 'false'
         id: hashes
         run: |
-          AAPT2=$(find "$ANDROID_HOME/build-tools" -name aapt2 | sort -V | tail -n1)
           APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -n1)
 
-          CERT=$("$APKSIGNER" verify --print-certs module/system/app/webview/webview.apk \
-            | sed -n 's/^Signer #1 certificate SHA-256 digest: //p' | head -n1)
-          echo "cert: $CERT"
-          [ "$CERT" = "$EXPECTED_CERT_SHA256" ] || { echo "::error::not signed by GrapheneOS"; exit 1; }
+          VERIFY=$("$APKSIGNER" verify --print-certs module/system/app/webview/webview.apk 2>&1)
+          echo "$VERIFY" | sed -n '1,12p'
+
+          CERT=$(echo "$VERIFY" | grep -i 'SHA-256 digest' | head -n1 | sed 's/.*digest: *//' | tr -d ':' | tr 'A-F' 'a-f' | tr -d '[:space:]')
+          EXPECTED=$(echo "$EXPECTED_CERT_SHA256" | tr -d ':' | tr 'A-F' 'a-f' | tr -d '[:space:]')
+          echo "cert:     $CERT"
+          echo "expected: $EXPECTED"
+
+          [ -n "$CERT" ] || { echo "::error::could not read APK certificate"; exit 1; }
+          [ "$CERT" = "$EXPECTED" ] || { echo "::error::APK is not signed by GrapheneOS"; exit 1; }
 
           WV=$(sha256sum module/system/app/webview/webview.apk | cut -d' ' -f1)
           CFG=$(sha256sum module/system/app/VanadiumConfig/VanadiumConfig.apk | cut -d' ' -f1)
