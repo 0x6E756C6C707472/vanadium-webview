@@ -43,18 +43,15 @@ jobs:
             if [[ "$CFG_DATE" > "$WV_DATE" ]]; then COMMIT="$CFG_ID"; else COMMIT="$WV_ID"; fi
           fi
           SHORT="${COMMIT:0:12}"
-          MODREV=$(find module overlay -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -c1-12)
           echo "commit=$COMMIT"   >> "$GITHUB_OUTPUT"
           echo "short=$SHORT"     >> "$GITHUB_OUTPUT"
-          echo "modrev=$MODREV"   >> "$GITHUB_OUTPUT"
           echo "Source commit: $COMMIT"
-          echo "Module revision: $MODREV"
 
           if [ "${{ inputs.force }}" = "true" ]; then
             echo "Force rebuild requested"
             echo "skip=false" >> "$GITHUB_OUTPUT"
           elif gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" --jq '.[].tag_name' \
-              | grep -Eq -- "-${SHORT}-m${MODREV}$"; then
+              | grep -Eq -- "-${SHORT}$"; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
@@ -126,7 +123,7 @@ jobs:
           [ -n "$VERSION_NAME" ] || { echo "::error::no versionName"; exit 1; }
           [ -z "$MIN_SDK" ] && MIN_SDK=30
 
-          TAG="v${VERSION_NAME}-${{ steps.source.outputs.short }}-m${{ steps.source.outputs.modrev }}"
+          TAG="v${VERSION_NAME}-${{ steps.source.outputs.short }}"
           CODE=$(date +%s)
           WV="${{ steps.hashes.outputs.wv }}"
           CFG="${{ steps.hashes.outputs.cfg }}"
